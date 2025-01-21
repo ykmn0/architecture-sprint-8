@@ -41,8 +41,8 @@ func main() {
 	var publicKey *rsa.PublicKey
 
 	// Attempt to get the public key with retries and increasing delay
-	errRetry := Retry(RetryCount, 500*time.Millisecond, func() (err error) {
-		publicKey, err = GetKeycloakPublicKey(keycloakURL)
+	errRetry := RetryWithDelay(RetryCount, 500*time.Millisecond, func() (err error) {
+		publicKey, err = FetchKeycloakPublicKey(keycloakURL)
 		return err
 	})
 
@@ -56,7 +56,7 @@ func main() {
 	}
 
 	// Handler for the /reports route
-	http.HandleFunc("/reports", Handler(publicKey))
+	http.HandleFunc("/reports", ReportsHandler(publicKey))
 
 	log.Println("Starting server on :8000")
 	log.Fatal(http.ListenAndServe(":8000", nil))
@@ -70,7 +70,7 @@ func getEnvironments() (*environments, error) {
 }
 
 // Retry function with multiple attempts
-func Retry(attempts int, delay time.Duration, fn func() error) error {
+func RetryWithDelay(attempts int, delay time.Duration, fn func() error) error {
 	for i := 0; i < attempts; i++ {
 		err := fn()
 		if err == nil {
@@ -83,13 +83,13 @@ func Retry(attempts int, delay time.Duration, fn func() error) error {
 }
 
 // Example function to retrieve the Keycloak public key
-func GetKeycloakPublicKey(url string) (*rsa.PublicKey, error) {
+func FetchKeycloakPublicKey(url string) (*rsa.PublicKey, error) {
 	// Logic for retrieving the public key from Keycloak
 	return nil, nil
 }
 
 // Example handler
-func Handler(publicKey *rsa.PublicKey) http.HandlerFunc {
+func ReportsHandler(publicKey *rsa.PublicKey) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Your request handling code here
 		fmt.Fprintf(w, "You can use handler with the public key: %v", publicKey)
