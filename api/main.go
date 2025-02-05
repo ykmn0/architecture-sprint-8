@@ -1,97 +1,95 @@
 package main
 
 import (
-	"crypto/rsa"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	c0env "github.com/caarlos0/env"
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/spf13/viper"
+	"github.com/tbaehler/gin-keycloak/pkg/ginkeycloak"
 )
 
-const RetryCount = 10
-
-type environments struct {
-	KeycloakURL   string `env:"KEYCLOAK_URL"`
-	KeycloakRealm string `env:"KEYCLOAK_REALM"`
-}
-
-var (
-	keycloakURL = "http://localhost:8080/realms/reports-realm"
+const (
+	CFG_PORT                    = "port"
+	CFG_PORT_DEFAULT            = "8090"
+	CFG_KEYCLOAK_URL            = "keycloak_url"
+	CFG_KEYCLOAK_URL_DEFAULT    = "http://keycloak:8080"
+	CFG_KEYCLOAK_REALM          = "keycloak_realm"
+	CFG_KEYCLOAK_REALM_DEFAULT  = "reports-realm"
+	CFG_KEYCLOAK_CLIENT         = "keycloak_client"
+	CFG_KEYCLOAK_CLIENT_DEFAULT = "reports-api"
+	CFG_ALLOW_ROLE              = "allow_role"
+	CFG_ALLOW_ROLE_DEFAULT      = "prothetic_user"
 )
-
-func init() {
-	// Load environment variables
-	env, err := getEnvironments()
-	if err != nil {
-		log.Fatalf("error loading environment variables: %v\n", err)
-	}
-
-	// Update URL and Realm values based on environment
-	if env.KeycloakURL != "" {
-		keycloakURL = env.KeycloakURL
-	}
-	if env.KeycloakRealm != "" {
-		keycloakURL = fmt.Sprintf("%s/realms/%s", keycloakURL, env.KeycloakRealm)
-	}
-}
 
 func main() {
-	var publicKey *rsa.PublicKey
 
-	// Attempt to get the public key with retries and increasing delay
-	errRetry := RetryWithDelay(RetryCount, 500*time.Millisecond, func() (err error) {
-		publicKey, err = FetchKeycloakPublicKey(keycloakURL)
-		return err
+	viper.SetDefault(CFG_PORT, CFG_PORT_DEFAULT)
+	viper.SetDefault(CFG_KEYCLOAK_URL, CFG_KEYCLOAK_URL_DEFAULT)
+	viper.SetDefault(CFG_KEYCLOAK_REALM, CFG_KEYCLOAK_REALM_DEFAULT)
+	viper.SetDefault(CFG_KEYCLOAK_CLIENT, CFG_KEYCLOAK_CLIENT_DEFAULT)
+	viper.SetDefault(CFG_ALLOW_ROLE, CFG_ALLOW_ROLE_DEFAULT)
+	viper.AutomaticEnv()
+
+	router := gin.Default()
+	router.Use(ginkeycloak.RequestLogger([]string{"uid"}, "data"))
+	router.Use(gin.Recovery())
+
+	headers := []string{"Content-Type", "Content-Length", "Accept-Encoding", "X-CSRF-Token", "Authorization", "accept", "origin", "Cache-Control", "X-Requested-With", "Token"}
+
+	cfg := cors.DefaultConfig()
+	cfg.AllowAllOrigins = true
+	cfg.AllowCredentials = true
+	cfg.AllowHeaders = append(cfg.AllowHeaders, headers...)
+	router.Use(cors.New(cfg))
+
+	keycloackConfig := ginkeycloak.BuilderConfig{
+		Url:   viper.GetString(CFG_KEYCLOAK_URL),
+		Realm: viper.GetString(CFG_KEYCLOAK_REALM),
+	}
+
+	privateApi := router.Group("/reports")
+	privateApi.Use(
+		ginkeycloak.NewAccessBuilder(keycloackConfig).
+			RestrictButForRealm(viper.GetString(CFG_ALLOW_ROLE)).Build(),
+	)
+	privateApi.GET("/", func(ctx *gin.Context) {
+		ctx.JSON(http.StatusOK, "ok")
 	})
 
-	if errRetry != nil {
-		log.Fatalf("failed to get Keycloak public key after retries: %v\n", errRetry)
+	srv := &http.Server{
+		Addr:    fmt.Sprintf(":%v", viper.GetInt(CFG_PORT)),
+		Handler: router.Handler(),
 	}
 
-	// Check if public key was received
-	if publicKey == nil {
-		log.Fatal("public key is nil")
-	}
-
-	// Handler for the /reports route
-	http.HandleFunc("/reports", ReportsHandler(publicKey))
-
-	log.Println("Starting server on :8000")
-	log.Fatal(http.ListenAndServe(":8000", nil))
-}
-
-// Function to load environment variables
-func getEnvironments() (*environments, error) {
-	env := new(environments)
-	err := c0env.Parse(env)
-	return env, err
-}
-
-// Retry function with multiple attempts
-func RetryWithDelay(attempts int, delay time.Duration, fn func() error) error {
-	for i := 0; i < attempts; i++ {
-		err := fn()
-		if err == nil {
-			return nil
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
 		}
-		log.Printf("attempt %d failed: %v; retrying in %v...", i+1, err, delay)
-		time.Sleep(delay)
-	}
-	return fmt.Errorf("after %d attempts, last error: %w", attempts, fn())
-}
+	}()
 
-// Example function to retrieve the Keycloak public key
-func FetchKeycloakPublicKey(url string) (*rsa.PublicKey, error) {
-	// Logic for retrieving the public key from Keycloak
-	return nil, nil
-}
+	quit := make(chan os.Signal, 1)
 
-// Example handler
-func ReportsHandler(publicKey *rsa.PublicKey) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Your request handling code here
-		fmt.Fprintf(w, "You can use handler with the public key: %v", publicKey)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutdown Server ...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server Shutdown:", err)
 	}
+
+	select {
+	case <-ctx.Done():
+		log.Println("timeout of 5 seconds.")
+	}
+	log.Println("Server exiting")
 }

@@ -1,13 +1,14 @@
-FROM golang:1.23
+FROM golang:latest
+
+WORKDIR /app
 
 COPY go.mod go.sum ./
 RUN go mod download
 
 COPY *.go ./
 
-RUN CGO_ENABLED=0 go build -o /app
+RUN CGO_ENABLED=0 GOOS=linux go build -o /api
 
-EXPOSE 8000
+EXPOSE 8090
 
-# Run
-CMD ["/app"]
+CMD ["/api"]
